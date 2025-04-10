@@ -1,8 +1,8 @@
 {
     "manifest_version": 3,
-    "name": "Bookmark Folder Copier",
-    "version": "1.0",
-    "description": "Copy bookmarks from Other Bookmarks folders to Bookmarks Bar",
+    "name": "Bookmark Set Manager",
+    "version": "2.0",
+    "description": "Manage different sets of bookmarks in your Bookmarks Bar with automatic syncing",
     "permissions": ["bookmarks"],
     "action": {
       "default_popup": "popup.html",

@@ -1,13 +1,22 @@
-# Bookmark Folder Copier Chrome Extension
+# Bookmark Set Manager (v2.0)
 
-A simple Chrome extension that lets you copy bookmarks from folders in "Other Bookmarks" to your Bookmarks Bar.
+An enhanced Chrome extension that allows you to maintain multiple bookmark sets and easily switch between them, with automatic syncing across devices.
 
 ## Features
 
-- View a list of all folders in "Other Bookmarks"
-- Copy all links from a selected folder (including nested folders/links) to the Bookmarks Bar
-- Maintains folder structure
-- Clears existing Bookmarks Bar items before copying
+- **Switch between multiple bookmark sets**: Click on any folder from "Other Bookmarks" to set it as your active bookmark bar
+- **Automatic syncing**: Any changes you make to your bookmark bar will be saved back to the original folder when you switch
+- **Visual indication**: Active bookmark set is highlighted in the extension popup
+- **Stability across devices**: Uses a GUID tracking system that works with Chrome Sync
+- **Preserves your workflow**: Switch contexts without losing your bookmark organization
+
+## How It Works
+
+1. Each "bookmark set" (folder in Other Bookmarks) gets a unique identifier (GUID)
+2. When you switch to a folder, its bookmarks are copied to your Bookmarks Bar
+3. A special tracking bookmark is added to both locations to maintain the connection
+4. When you switch sets, any changes to your Bookmarks Bar are saved back to the original folder
+5. The system works across all your synced Chrome browsers
 
 ## Installation
 
@@ -20,17 +29,28 @@ A simple Chrome extension that lets you copy bookmarks from folders in "Other Bo
 ## Usage
 
 1. Click the extension icon in the Chrome toolbar
-2. Select a folder from the list
-3. All bookmarks from that folder will be copied to your Bookmarks Bar, preserving the folder structure
-4. The Bookmarks Bar will be cleared before copying new bookmarks
+2. Select a folder to set as your active bookmark bar
+3. Add, remove, or modify bookmarks as needed
+4. When you want to switch to a different set, click the extension icon again and select another folder
+5. Your changes will automatically be saved back to the original folder
+
+## Technical Details
+
+- The extension uses a hidden bookmark with a GUID prefix to track which folder is currently active
+- This GUID system ensures that even when your bookmarks sync across devices, the extension can still identify the correct folder
+- The tracking bookmark is visible but designed to be unobtrusive (with a 📋 icon)
 
 ## Files
 
 - `manifest.json`: Extension configuration
 - `popup.html`: UI for the extension popup
-- `popup.js`: Logic for bookmark manipulation
-- `icon16.png`, `icon48.png`, `icon128.png`: Extension icons
+- `popup.js`: Enhanced logic for bookmark synchronization and management
+- Various icon files
 
-## Note
+## Changelog from v1.0
 
-You'll need to create placeholder icons (16x16, 48x48, and 128x128 pixels) named `icon16.png`, `icon48.png`, and `icon128.png` or replace the icon references in the manifest with your own icons.
+- Complete rewrite of the bookmark handling system
+- Added bidirectional syncing between bookmark bar and source folders
+- Improved UI with active folder highlighting
+- New GUID-based tracking system for cross-device stability
+- Renamed to "Bookmark Set Manager" to better reflect functionality
