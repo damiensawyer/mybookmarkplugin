@@ -1,3 +1,489 @@
+// Constants for Chrome bookmarks
+const BOOKMARKS_BAR_ID = '1';
+const OTHER_BOOKMARKS_ID = '2';
+const GUID_PREFIX = 'https://bookmark-tracker.extension/guid/';
+const SYSTEM_FOLDER_NAME = 'Bookmark Set Manager Config';
+
+// DOM elements
+const foldersContainer = document.getElementById('folders');
+const statusElement = document.getElementById('status');
+
+// Global state
+let activeFolderGuid = null;
+let systemFolderId = null;
+
+// Initialize the popup
+document.addEventListener('DOMContentLoaded', () => {
+  statusElement.textContent = 'Checking bookmarks...';
+  
+  // Global error handler for uncaught promises
+  window.addEventListener('unhandledrejection', function(event) {
+    console.error('Unhandled Promise Rejection:', event.reason);
+    statusElement.textContent = `Error: ${event.reason.message || 'Unknown error'}`;
+  });
+  
+  performHealthCheck()
+    .catch(error => {
+      console.error('Error during health check:', error);
+      statusElement.textContent = `Error during health check: ${error.message}`;
+      // Try recovery
+      return recoverFromErrors();
+    })
+    .then(() => checkActiveFolder())
+    .catch(error => {
+      console.error('Error checking active folder:', error);
+      statusElement.textContent = `Error checking active folder: ${error.message}`;
+      // Try to create a default folder if needed
+      return createDefaultFolder()
+        .then(folderId => {
+          console.log('Created default folder as recovery:', folderId);
+          return getOrCreateFolderGuid(folderId)
+            .then(guid => {
+              activeFolderGuid = guid;
+              statusElement.textContent = 'Created default bookmark set as recovery';
+            });
+        })
+        .catch(recoveryError => {
+          console.error('Recovery failed:', recoveryError);
+          // We can continue without active folder
+        });
+    })
+    .then(() => loadFolders())
+    .catch(error => {
+      console.error('Error loading folders:', error);
+      statusElement.textContent = `Error loading folders: ${error.message}`;
+      
+      // Try one more aggressive recovery
+      return chrome.bookmarks.getTree()
+        .then(tree => {
+          // If we can access bookmarks at all, try to show something
+          foldersContainer.innerHTML = '<p>Error loading folders. Trying to recover...</p>';
+          
+          // Force create the "Automatically Created" folder
+          return createDefaultFolder()
+            .then(folderId => {
+              statusElement.textContent = 'Created recovery folder. Please refresh.';
+              
+              // Try to load again after a delay
+              setTimeout(() => {
+                loadFolders()
+                  .catch(finalError => {
+                    // Show a simplified UI if we still can't load folders
+                    foldersContainer.innerHTML = '<div class="folder">Default Recovery Folder</div>';
+                    console.error('Final recovery attempt failed:', finalError);
+                  });
+              }, 1000);
+            });
+        })
+        .catch(finalError => {
+          // Show a simplified UI if we can't load folders
+          foldersContainer.innerHTML = '<p>Error accessing bookmarks. Please try restarting the extension.</p>';
+          console.error('Cannot access bookmarks API:', finalError);
+        });
+    })
+    .finally(() => {
+      // Clear loading message if we got this far successfully
+      if (statusElement.textContent === 'Checking bookmarks...') {
+        statusElement.textContent = '';
+      }
+    });
+});
+
+// Perform health check to ensure extension integrity
+const performHealthCheck = () => {
+  console.log('Performing health check...');
+  
+  // First, ensure the system folder exists in Other Bookmarks
+  return ensureSystemFolderExists()
+    .then(() => {
+      // Then, ensure all folders in Other Bookmarks have GUID trackers
+      return ensureAllFoldersHaveGuids();
+    })
+    .then(() => {
+      // Verify the active folder still exists, repair if needed
+      return verifyActiveFolder();
+    });
+};
+
+// Update the GUID bookmark in the system folder
+const updateSystemFolderGuid = (guid, originalFolderId) => {
+  if (!systemFolderId) {
+    // Ensure system folder exists
+    return ensureSystemFolderExists()
+      .then(() => updateSystemFolderGuid(guid, originalFolderId));
+  }
+  
+  return chrome.bookmarks.getSubTree(systemFolderId)
+    .then(results => {
+      const systemFolder = results[0];
+      
+      // First clean the system folder - it should only contain the config bookmark
+      const cleanPromises = [];
+      
+      if (systemFolder.children) {
+        for (const child of systemFolder.children) {
+          // We'll recreate the config bookmark, so remove everything for now
+          cleanPromises.push(
+            chrome.bookmarks.remove(child.id)
+              .catch(err => console.log(`Could not remove ${child.title}:`, err))
+          );
+        }
+      }
+      
+      return Promise.all(cleanPromises)
+        .then(() => {
+          // Create new config bookmark
+          return chrome.bookmarks.create({
+            parentId: systemFolderId,
+            title: 'Bookmark Set Configuration - DO NOT MODIFY',
+            url: GUID_PREFIX + guid
+          });
+        });
+    });
+};
+
+// Get a short name for a folder
+const getShortName = (folderId) => {
+  return new Promise(resolve => {
+    chrome.bookmarks.get(folderId, (results) => {
+      const folder = results[0];
+      resolve(folder ? folder.title : 'Bookmark Bar');
+    });
+  });
+};
+
+// Fix for the Invalid URL error - ensure URL is valid before creating bookmark
+const createBookmarkSafely = (parentId, title, url) => {
+  // Check if URL is valid
+  try {
+    // Try to create a URL object to validate it
+    new URL(url);
+    
+    // URL is valid, create the bookmark
+    return chrome.bookmarks.create({
+      parentId,
+      title,
+      url
+    });
+  } catch (error) {
+    console.error(`Invalid URL detected: ${url}`);
+    
+    // Create a placeholder bookmark instead
+    const safeUrl = 'about:blank#invalid-' + encodeURIComponent(url);
+    return chrome.bookmarks.create({
+      parentId,
+      title: title + ' [INVALID URL]',
+      url: safeUrl
+    });
+  }
+};
+
+// Get all bookmarks in a folder, excluding the GUID bookmark
+const getAllBookmarksInFolder = (folderId) => {
+  return chrome.bookmarks.getSubTree(folderId)
+    .then(results => {
+      const folder = results[0];
+      let bookmarks = [];
+      
+      const processNode = (node) => {
+        if (node.url) {
+          // Skip GUID bookmarks
+          if (!node.url.startsWith(GUID_PREFIX) && !node.url.startsWith('GUID_TRACKER:')) {
+            // This is a bookmark
+            bookmarks.push({
+              url: node.url,
+              title: node.title
+            });
+          }
+        } else if (node.children) {
+          // This is a folder, process its children
+          node.children.forEach(processNode);
+        }
+      };
+      
+      processNode(folder);
+      return bookmarks;
+    });
+};
+
+// Clear the Bookmarks Bar
+const clearBookmarksBar = (bookmarksBar) => {
+  if (!bookmarksBar.children || bookmarksBar.children.length === 0) {
+    return Promise.resolve();
+  }
+  
+  // Remove all children of the bookmarks bar
+  const removePromises = bookmarksBar.children.map(node => {
+    if (node.children && node.children.length > 0) {
+      return chrome.bookmarks.removeTree(node.id);
+    } else {
+      return chrome.bookmarks.remove(node.id);
+    }
+  });
+  
+  return Promise.all(removePromises);
+};
+
+// Add new bookmarks to the Bookmarks Bar
+const addNewBookmarks = (bookmarks) => {
+  // Process bookmarks one by one, adding them directly to the Bookmarks Bar
+  return bookmarks.reduce((promise, bookmark) => {
+    return promise.then(() => {
+      // Add the bookmark directly to the Bookmarks Bar
+      return createBookmarkSafely(
+        BOOKMARKS_BAR_ID,
+        bookmark.title,
+        bookmark.url
+      );
+    });
+  }, Promise.resolve());
+};
+
+// Set a new active folder
+const setNewActiveFolder = (newFolderId) => {
+  // First verify the folder exists to prevent issues
+  chrome.bookmarks.get(newFolderId)
+    .then(results => {
+      if (!results || results.length === 0) {
+        throw new Error('Selected folder no longer exists');
+      }
+      
+      return getOrCreateFolderGuid(newFolderId);
+    })
+    .then(guid => {
+      activeFolderGuid = guid;
+      
+      // Get all bookmarks in the selected folder
+      return getAllBookmarksInFolder(newFolderId)
+        .catch(error => {
+          console.error('Error getting bookmarks:', error);
+          // If we can't get the bookmarks, use an empty array as fallback
+          statusElement.textContent = 'Warning: Using empty bookmark set due to error';
+          return [];
+        })
+        .then(newBookmarks => {
+          // Clear the bookmarks bar
+          return chrome.bookmarks.getSubTree(BOOKMARKS_BAR_ID)
+            .then(results => {
+              const bookmarksBar = results[0];
+              return clearBookmarksBar(bookmarksBar)
+                .then(() => {
+                  // Update the GUID in the system folder
+                  return updateSystemFolderGuid(guid, newFolderId);
+                })
+                .then(() => addNewBookmarks(newBookmarks));
+            });
+        });
+    })
+    .then(() => {
+      statusElement.textContent = 'Bookmarks switched successfully!';
+      setTimeout(() => {
+        statusElement.textContent = '';
+      }, 3000);
+      
+      // Update UI to show active folder
+      document.querySelectorAll('.folder').forEach(el => {
+        el.classList.remove('active');
+      });
+      
+      // Find and mark the active folder
+      chrome.bookmarks.get(newFolderId)
+        .then(results => {
+          if (results && results.length > 0) {
+            const folder = results[0];
+            document.querySelectorAll('.folder').forEach(el => {
+              if (el.textContent === folder.title) {
+                el.classList.add('active');
+              }
+            });
+          }
+        })
+        .catch(error => {
+          console.warn('Could not mark active folder in UI:', error);
+          // Continue without marking active folder in UI
+        });
+    })
+    .catch(error => {
+      statusElement.textContent = `Error switching bookmarks: ${error.message}`;
+      console.error('Error switching bookmarks:', error);
+      
+      // Attempt to recover by recreating automatic folder
+      if (error.message.includes('no longer exists')) {
+        setTimeout(() => {
+          statusElement.textContent = 'Attempting to create default folder...';
+          createDefaultFolder()
+            .then(newFolderId => {
+              // Try to switch to the new folder
+              return getOrCreateFolderGuid(newFolderId)
+                .then(() => {
+                  statusElement.textContent = 'Created new default folder. Please try again.';
+                  // Refresh the folder list
+                  loadFolders();
+                });
+            })
+            .catch(recoveryError => {
+              statusElement.textContent = 'Recovery failed. Please restart extension.';
+              console.error('Recovery error:', recoveryError);
+            });
+        }, 2000);
+      }
+    });
+};
+
+// Create a recovery folder when the original folder is not found
+const createRecoveryFolder = (guid, bookmarks) => {
+  const folderName = `Recovered Set (${new Date().toLocaleDateString()})`;
+  console.log(`Creating recovery folder: ${folderName}`);
+  
+  // Create a new folder in Other Bookmarks
+  return chrome.bookmarks.create({
+    parentId: OTHER_BOOKMARKS_ID,
+    title: folderName
+  })
+  .then(newFolder => {
+    statusElement.textContent = `Created recovery folder: ${folderName}`;
+    
+    // Add the GUID bookmark to maintain continuity
+    return chrome.bookmarks.create({
+      parentId: newFolder.id,
+      title: 'Bookmark Set Configuration - DO NOT MODIFY',
+      url: GUID_PREFIX + guid
+    })
+    .then(() => {
+      // Add all the bookmarks
+      return addBookmarksToFolder(bookmarks, newFolder.id)
+        .then(() => {
+          // Show success message
+          statusElement.textContent = `Bookmarks saved to recovery folder: ${folderName}`;
+          setTimeout(() => {
+            if (statusElement.textContent.includes('recovery folder')) {
+              statusElement.textContent = '';
+            }
+          }, 5000);
+          return newFolder.id;
+        });
+    });
+  });
+};
+
+// Find a folder by its GUID
+const findFolderByGuid = (guid) => {
+  // This will search in Other Bookmarks for a folder containing the GUID
+  return chrome.bookmarks.getSubTree(OTHER_BOOKMARKS_ID)
+    .then(results => {
+      const otherBookmarks = results[0];
+      
+      if (!otherBookmarks.children) {
+        return null;
+      }
+      
+      // Only check folders
+      const folders = otherBookmarks.children.filter(node => !node.url);
+      
+      // Check each folder for the GUID
+      return Promise.all(folders.map(folder => {
+        return findGuidBookmark(folder)
+          .then(folderGuid => {
+            if (folderGuid === guid) {
+              return folder.id;
+            }
+            return null;
+          });
+      }))
+      .then(results => {
+        // Filter out nulls and return the first match
+        const matches = results.filter(id => id !== null);
+        return matches.length > 0 ? matches[0] : null;
+      });
+    });
+};
+
+// Clear a folder except for the GUID bookmark
+const clearFolderExceptGuid = (folder) => {
+  if (!folder.children || folder.children.length === 0) {
+    return Promise.resolve();
+  }
+  
+  const removePromises = [];
+  
+  for (const child of folder.children) {
+    if (!child.url || !child.url.startsWith(GUID_PREFIX)) {
+      removePromises.push(
+        child.children && child.children.length > 0
+          ? chrome.bookmarks.removeTree(child.id)
+          : chrome.bookmarks.remove(child.id)
+      );
+    }
+  }
+  
+  return Promise.all(removePromises);
+};
+
+// Add bookmarks to a folder
+const addBookmarksToFolder = (bookmarks, folderId) => {
+  console.log(`Adding ${bookmarks.length} bookmarks to folder ${folderId}`);
+  
+  if (bookmarks.length === 0) {
+    console.log('No bookmarks to add');
+    return Promise.resolve();
+  }
+  
+  // Create array of promises for each bookmark creation
+  const createPromises = bookmarks.map(bookmark => {
+    return createBookmarkSafely(
+      folderId,
+      bookmark.title,
+      bookmark.url
+    ).catch(error => {
+      console.error(`Error creating bookmark "${bookmark.title}":`, error);
+      // Continue with other bookmarks even if one fails
+      return Promise.resolve();
+    });
+  });
+  
+  // Process all bookmarks in parallel for better performance
+  return Promise.all(createPromises)
+    .then(() => {
+      console.log(`Successfully added ${bookmarks.length} bookmarks to folder ${folderId}`);
+      return Promise.resolve();
+    });
+};
+
+// Ensure the system folder exists in Other Bookmarks
+const ensureSystemFolderExists = () => {
+  return chrome.bookmarks.getSubTree(OTHER_BOOKMARKS_ID)
+    .then(results => {
+      const otherBookmarks = results[0];
+      
+      // Look for existing system folder
+      if (otherBookmarks.children) {
+        for (const child of otherBookmarks.children) {
+          if (!child.url && child.title === SYSTEM_FOLDER_NAME) {
+            systemFolderId = child.id;
+            
+            // Clean up the system folder - it should only contain the GUID
+            return cleanSystemFolder(child)
+              .then(() => Promise.resolve());
+          }
+        }
+      }
+      
+      // If not found, create it
+      return chrome.bookmarks.create({
+        parentId: OTHER_BOOKMARKS_ID,
+        title: SYSTEM_FOLDER_NAME
+      })
+      .then(newFolder => {
+        systemFolderId = newFolder.id;
+        console.log('Created system folder in Other Bookmarks');
+      });
+    })
+    .then(() => {
+      // Look for and migrate any system folder in bookmark bar
+      return checkAndMigrateFromBookmarkBar();
+    });
+};
+
 // Check for and migrate system folder from bookmark bar to Other Bookmarks
 const checkAndMigrateFromBookmarkBar = () => {
   return chrome.bookmarks.getSubTree(BOOKMARKS_BAR_ID)
@@ -105,146 +591,6 @@ const migrateLegacyGuid = (legacyInfo) => {
           });
       });
     });
-};// Constants for Chrome bookmarks
-const BOOKMARKS_BAR_ID = '1';
-const OTHER_BOOKMARKS_ID = '2';
-const GUID_PREFIX = 'https://bookmark-tracker.extension/guid/';
-const SYSTEM_FOLDER_NAME = 'Bookmark Set Manager Config';
-
-// DOM elements
-const foldersContainer = document.getElementById('folders');
-const statusElement = document.getElementById('status');
-
-// Global state
-let activeFolderGuid = null;
-let systemFolderId = null;
-
-// Initialize the popup
-document.addEventListener('DOMContentLoaded', () => {
-  statusElement.textContent = 'Checking bookmarks...';
-  
-  // Global error handler for uncaught promises
-  window.addEventListener('unhandledrejection', function(event) {
-    console.error('Unhandled Promise Rejection:', event.reason);
-    statusElement.textContent = `Error: ${event.reason.message || 'Unknown error'}`;
-  });
-  
-  performHealthCheck()
-    .catch(error => {
-      console.error('Error during health check:', error);
-      statusElement.textContent = `Error during health check: ${error.message}`;
-      // Try recovery
-      return recoverFromErrors();
-    })
-    .then(() => checkActiveFolder())
-    .catch(error => {
-      console.error('Error checking active folder:', error);
-      statusElement.textContent = `Error checking active folder: ${error.message}`;
-      // Try to create a default folder if needed
-      return createDefaultFolder()
-        .then(folderId => {
-          console.log('Created default folder as recovery:', folderId);
-          return getOrCreateFolderGuid(folderId)
-            .then(guid => {
-              activeFolderGuid = guid;
-              statusElement.textContent = 'Created default bookmark set as recovery';
-            });
-        })
-        .catch(recoveryError => {
-          console.error('Recovery failed:', recoveryError);
-          // We can continue without active folder
-        });
-    })
-    .then(() => loadFolders())
-    .catch(error => {
-      console.error('Error loading folders:', error);
-      statusElement.textContent = `Error loading folders: ${error.message}`;
-      
-      // Try one more aggressive recovery
-      return chrome.bookmarks.getTree()
-        .then(tree => {
-          // If we can access bookmarks at all, try to show something
-          foldersContainer.innerHTML = '<p>Error loading folders. Trying to recover...</p>';
-          
-          // Force create the "Automatically Created" folder
-          return createDefaultFolder()
-            .then(folderId => {
-              statusElement.textContent = 'Created recovery folder. Please refresh.';
-              
-              // Try to load again after a delay
-              setTimeout(() => {
-                loadFolders()
-                  .catch(finalError => {
-                    // Show a simplified UI if we still can't load folders
-                    foldersContainer.innerHTML = '<div class="folder">Default Recovery Folder</div>';
-                    console.error('Final recovery attempt failed:', finalError);
-                  });
-              }, 1000);
-            });
-        })
-        .catch(finalError => {
-          // Show a simplified UI if we can't load folders
-          foldersContainer.innerHTML = '<p>Error accessing bookmarks. Please try restarting the extension.</p>';
-          console.error('Cannot access bookmarks API:', finalError);
-        });
-    })
-    .finally(() => {
-      // Clear loading message if we got this far successfully
-      if (statusElement.textContent === 'Checking bookmarks...') {
-        statusElement.textContent = '';
-      }
-    });
-});
-
-// Perform health check to ensure extension integrity
-const performHealthCheck = () => {
-  console.log('Performing health check...');
-  
-  // First, ensure the system folder exists in Other Bookmarks
-  return ensureSystemFolderExists()
-    .then(() => {
-      // Then, ensure all folders in Other Bookmarks have GUID trackers
-      return ensureAllFoldersHaveGuids();
-    })
-    .then(() => {
-      // Verify the active folder still exists, repair if needed
-      return verifyActiveFolder();
-    });
-};
-
-// Ensure the system folder exists in Other Bookmarks
-const ensureSystemFolderExists = () => {
-  return chrome.bookmarks.getSubTree(OTHER_BOOKMARKS_ID)
-    .then(results => {
-      const otherBookmarks = results[0];
-      
-      // Look for existing system folder
-      if (otherBookmarks.children) {
-        for (const child of otherBookmarks.children) {
-          if (!child.url && child.title === SYSTEM_FOLDER_NAME) {
-            systemFolderId = child.id;
-            
-            // Clean up the system folder - it should only contain the GUID
-            return cleanSystemFolder(child)
-              .then(() => Promise.resolve());
-          }
-        }
-      }
-      
-      // If not found, create it
-      return chrome.bookmarks.create({
-        parentId: OTHER_BOOKMARKS_ID,
-        title: SYSTEM_FOLDER_NAME
-      })
-      .then(newFolder => {
-        systemFolderId = newFolder.id;
-        console.log('Created system folder in Other Bookmarks');
-      });
-    })
-    .then(() => {
-      // Look for and migrate any system folder in bookmark bar
-      return checkAndMigrateFromBookmarkBar();
-    });
 };
 
 // Clean the system folder to ensure it only contains GUID configuration
@@ -291,6 +637,8 @@ const verifyActiveFolder = () => {
     return Promise.resolve(); // No active folder to verify
   }
   
+  console.log(`Verifying active folder with GUID: ${activeFolderGuid}`);
+  
   return findFolderByGuid(activeFolderGuid)
     .then(folderId => {
       if (!folderId) {
@@ -304,7 +652,9 @@ const verifyActiveFolder = () => {
             
             if (bookmarksBar.children) {
               for (const child of bookmarksBar.children) {
-                if (child.id !== systemFolderId && child.url) {
+                if (child.url && 
+                    !child.url.startsWith(GUID_PREFIX) && 
+                    !child.url.startsWith('GUID_TRACKER:')) {
                   currentBookmarks.push({
                     url: child.url,
                     title: child.title
@@ -312,6 +662,8 @@ const verifyActiveFolder = () => {
                 }
               }
             }
+            
+            console.log(`Found ${currentBookmarks.length} bookmarks to recover`);
             
             // Create a recovery folder with the active GUID
             return createRecoveryFolder(activeFolderGuid, currentBookmarks)
@@ -321,6 +673,8 @@ const verifyActiveFolder = () => {
               });
           });
       }
+      
+      console.log(`Active folder verified, ID: ${folderId}`);
       return Promise.resolve(); // Active folder exists, continue
     });
 };
@@ -768,10 +1122,54 @@ const addDiagnosticMessage = (message) => {
 
 // Switch to a new bookmark folder
 const switchToFolder = (newFolderId) => {
+  // Show status indicator
+  statusElement.textContent = 'Saving current bookmarks...';
+  
   // If there's an active folder, save its state first
   if (activeFolderGuid) {
-    saveActiveBookmarksState()
-      .then(() => setNewActiveFolder(newFolderId))
+    // First get the current bookmark bar state
+    chrome.bookmarks.getSubTree(BOOKMARKS_BAR_ID)
+      .then(results => {
+        const bookmarksBar = results[0];
+        const currentBookmarks = [];
+        
+        // Get all bookmarks from the bar
+        if (bookmarksBar.children) {
+          for (const child of bookmarksBar.children) {
+            if (child.url && 
+                !child.url.startsWith(GUID_PREFIX) && 
+                !child.url.startsWith('GUID_TRACKER:')) {
+              currentBookmarks.push({
+                url: child.url,
+                title: child.title
+              });
+            }
+          }
+        }
+        
+        // Find the original folder with the active GUID
+        return findFolderByGuid(activeFolderGuid)
+          .then(folderId => {
+            if (!folderId) {
+              // This is a recovery situation, not an error
+              statusElement.textContent = 'Bookmark set folder missing - creating recovery folder';
+              console.log('Bookmark set folder not found - creating recovery folder');
+              return createRecoveryFolder(activeFolderGuid, currentBookmarks);
+            }
+            
+            // Clear and update the original folder
+            return chrome.bookmarks.getSubTree(folderId)
+              .then(results => {
+                const folder = results[0];
+                return clearFolderExceptGuid(folder)
+                  .then(() => addBookmarksToFolder(currentBookmarks, folderId));
+              });
+          })
+          .then(() => {
+            // After saving is complete, set the new active folder
+            return setNewActiveFolder(newFolderId);
+          });
+      })
       .catch(error => {
         statusElement.textContent = `Error saving current bookmarks: ${error.message}`;
         console.error('Error saving bookmarks:', error);
@@ -784,368 +1182,76 @@ const switchToFolder = (newFolderId) => {
 
 // Save current bookmark bar state back to the original folder
 const saveActiveBookmarksState = () => {
-  return chrome.bookmarks.getSubTree(BOOKMARKS_BAR_ID)
-    .then(results => {
-      const bookmarksBar = results[0];
-      const currentBookmarks = [];
-      
-      // Get all bookmarks from the bar
-      if (bookmarksBar.children) {
-        for (const child of bookmarksBar.children) {
-          if (child.url) {
-            currentBookmarks.push({
-              url: child.url,
-              title: child.title
-            });
-          }
-        }
-      }
-      
-      // Find the original folder with the active GUID
-      return findFolderByGuid(activeFolderGuid)
-        .then(folderId => {
-          if (!folderId) {
-            // This is a recovery situation, not an error
-            statusElement.textContent = 'Bookmark set folder missing - creating recovery folder';
-            console.log('Bookmark set folder not found - creating recovery folder');
-            return createRecoveryFolder(activeFolderGuid, currentBookmarks);
-          }
-          
-          // Clear and update the original folder
-          return chrome.bookmarks.getSubTree(folderId)
-            .then(results => {
-              const folder = results[0];
-              return clearFolderExceptGuid(folder)
-                .then(() => addBookmarksToFolder(currentBookmarks, folderId));
-            });
-        });
-    });
-};
-
-// Create a recovery folder when the original folder is not found
-const createRecoveryFolder = (guid, bookmarks) => {
-  const folderName = `Recovered Set (${new Date().toLocaleDateString()})`;
-  console.log(`Creating recovery folder: ${folderName}`);
-  
-  // Create a new folder in Other Bookmarks
-  return chrome.bookmarks.create({
-    parentId: OTHER_BOOKMARKS_ID,
-    title: folderName
-  })
-  .then(newFolder => {
-    statusElement.textContent = `Created recovery folder: ${folderName}`;
-    
-    // Add the GUID bookmark to maintain continuity
-    return chrome.bookmarks.create({
-      parentId: newFolder.id,
-      title: 'Bookmark Set Configuration - DO NOT MODIFY',
-      url: GUID_PREFIX + guid
-    })
-    .then(() => {
-      // Add all the bookmarks
-      return addBookmarksToFolder(bookmarks, newFolder.id)
-        .then(() => {
-          // Show success message
-          statusElement.textContent = `Bookmarks saved to recovery folder: ${folderName}`;
-          setTimeout(() => {
-            if (statusElement.textContent.includes('recovery folder')) {
-              statusElement.textContent = '';
-            }
-          }, 5000);
-          return newFolder.id;
-        });
-    });
-  });
-};
-
-// Find a folder by its GUID
-const findFolderByGuid = (guid) => {
-  // This will search in Other Bookmarks for a folder containing the GUID
-  return chrome.bookmarks.getSubTree(OTHER_BOOKMARKS_ID)
-    .then(results => {
-      const otherBookmarks = results[0];
-      
-      if (!otherBookmarks.children) {
-        return null;
-      }
-      
-      // Only check folders
-      const folders = otherBookmarks.children.filter(node => !node.url);
-      
-      // Check each folder for the GUID
-      return Promise.all(folders.map(folder => {
-        return findGuidBookmark(folder)
-          .then(folderGuid => {
-            if (folderGuid === guid) {
-              return folder.id;
-            }
-            return null;
-          });
-      }))
+  return new Promise((resolve, reject) => {
+    chrome.bookmarks.getSubTree(BOOKMARKS_BAR_ID)
       .then(results => {
-        // Filter out nulls and return the first match
-        const matches = results.filter(id => id !== null);
-        return matches.length > 0 ? matches[0] : null;
-      });
-    });
-};
-
-// Clear a folder except for the GUID bookmark
-const clearFolderExceptGuid = (folder) => {
-  if (!folder.children || folder.children.length === 0) {
-    return Promise.resolve();
-  }
-  
-  const removePromises = [];
-  
-  for (const child of folder.children) {
-    if (!child.url || !child.url.startsWith(GUID_PREFIX)) {
-      removePromises.push(
-        child.children && child.children.length > 0
-          ? chrome.bookmarks.removeTree(child.id)
-          : chrome.bookmarks.remove(child.id)
-      );
-    }
-  }
-  
-  return Promise.all(removePromises);
-};
-
-// Add bookmarks to a folder
-const addBookmarksToFolder = (bookmarks, folderId) => {
-  // Process bookmarks one by one
-  return bookmarks.reduce((promise, bookmark) => {
-    return promise.then(() => {
-      return createBookmarkSafely(
-        folderId,
-        bookmark.title,
-        bookmark.url
-      );
-    });
-  }, Promise.resolve());
-};
-
-// Set a new active folder
-const setNewActiveFolder = (folderId) => {
-  // First verify the folder exists to prevent issues
-  chrome.bookmarks.get(folderId)
-    .then(results => {
-      if (!results || results.length === 0) {
-        throw new Error('Selected folder no longer exists');
-      }
-      
-      return getOrCreateFolderGuid(folderId);
-    })
-    .then(guid => {
-      activeFolderGuid = guid;
-      
-      // Get all bookmarks in the selected folder
-      return getAllBookmarksInFolder(folderId)
-        .catch(error => {
-          console.error('Error getting bookmarks:', error);
-          // If we can't get the bookmarks, use an empty array as fallback
-          statusElement.textContent = 'Warning: Using empty bookmark set due to error';
-          return [];
-        })
-        .then(newBookmarks => {
-          // Clear the bookmarks bar
-          return chrome.bookmarks.getSubTree(BOOKMARKS_BAR_ID)
-            .then(results => {
-              const bookmarksBar = results[0];
-              return clearBookmarksBar(bookmarksBar)
-                .then(() => {
-                  // Update the GUID in the system folder
-                  return updateSystemFolderGuid(guid, folderId);
+        const bookmarksBar = results[0];
+        const currentBookmarks = [];
+        
+        // Get all bookmarks from the bar
+        if (bookmarksBar.children) {
+          for (const child of bookmarksBar.children) {
+            // Only include actual bookmarks with URLs, not folders or special items
+            if (child.url && 
+                !child.url.startsWith(GUID_PREFIX) && 
+                !child.url.startsWith('GUID_TRACKER:')) {
+              currentBookmarks.push({
+                url: child.url,
+                title: child.title
+              });
+            }
+          }
+        }
+        
+        console.log(`Saving ${currentBookmarks.length} bookmarks to active folder`);
+        
+        // Find the original folder with the active GUID
+        findFolderByGuid(activeFolderGuid)
+          .then(folderId => {
+            if (!folderId) {
+              // This is a recovery situation, not an error
+              statusElement.textContent = 'Bookmark set folder missing - creating recovery folder';
+              console.log('Bookmark set folder not found - creating recovery folder');
+              createRecoveryFolder(activeFolderGuid, currentBookmarks)
+                .then(resolve)
+                .catch(reject);
+            } else {
+              // Clear and update the original folder
+              chrome.bookmarks.getSubTree(folderId)
+                .then(results => {
+                  const folder = results[0];
+                  clearFolderExceptGuid(folder)
+                    .then(() => {
+                      // Add all bookmarks to the folder
+                      addBookmarksToFolder(currentBookmarks, folderId)
+                        .then(() => {
+                          console.log(`Successfully saved bookmarks to folder ID: ${folderId}`);
+                          resolve(folderId);
+                        })
+                        .catch(error => {
+                          console.error('Error adding bookmarks to folder:', error);
+                          reject(error);
+                        });
+                    })
+                    .catch(error => {
+                      console.error('Error clearing folder:', error);
+                      reject(error);
+                    });
                 })
-                .then(() => addNewBookmarks(newBookmarks));
-            });
-        });
-    })
-    .then(() => {
-      statusElement.textContent = 'Bookmarks switched successfully!';
-      setTimeout(() => {
-        statusElement.textContent = '';
-      }, 3000);
-      
-      // Update UI to show active folder
-      document.querySelectorAll('.folder').forEach(el => {
-        el.classList.remove('active');
-      });
-      
-      // Find and mark the active folder
-      chrome.bookmarks.get(folderId)
-        .then(results => {
-          if (results && results.length > 0) {
-            const folder = results[0];
-            document.querySelectorAll('.folder').forEach(el => {
-              if (el.textContent === folder.title) {
-                el.classList.add('active');
-              }
-            });
-          }
-        })
-        .catch(error => {
-          console.warn('Could not mark active folder in UI:', error);
-          // Continue without marking active folder in UI
-        });
-    })
-    .catch(error => {
-      statusElement.textContent = `Error switching bookmarks: ${error.message}`;
-      console.error('Error switching bookmarks:', error);
-      
-      // Attempt to recover by recreating automatic folder
-      if (error.message.includes('no longer exists')) {
-        setTimeout(() => {
-          statusElement.textContent = 'Attempting to create default folder...';
-          createDefaultFolder()
-            .then(newFolderId => {
-              // Try to switch to the new folder
-              return getOrCreateFolderGuid(newFolderId)
-                .then(() => {
-                  statusElement.textContent = 'Created new default folder. Please try again.';
-                  // Refresh the folder list
-                  loadFolders();
+                .catch(error => {
+                  console.error('Error getting folder subtree:', error);
+                  reject(error);
                 });
-            })
-            .catch(recoveryError => {
-              statusElement.textContent = 'Recovery failed. Please restart extension.';
-              console.error('Recovery error:', recoveryError);
-            });
-        }, 2000);
-      }
-    });
-};
-
-// Update the GUID bookmark in the system folder
-const updateSystemFolderGuid = (guid, originalFolderId) => {
-  if (!systemFolderId) {
-    // Ensure system folder exists
-    return ensureSystemFolderExists()
-      .then(() => updateSystemFolderGuid(guid, originalFolderId));
-  }
-  
-  return chrome.bookmarks.getSubTree(systemFolderId)
-    .then(results => {
-      const systemFolder = results[0];
-      
-      // First clean the system folder - it should only contain the config bookmark
-      const cleanPromises = [];
-      
-      if (systemFolder.children) {
-        for (const child of systemFolder.children) {
-          // We'll recreate the config bookmark, so remove everything for now
-          cleanPromises.push(
-            chrome.bookmarks.remove(child.id)
-              .catch(err => console.log(`Could not remove ${child.title}:`, err))
-          );
-        }
-      }
-      
-      return Promise.all(cleanPromises)
-        .then(() => {
-          // Create new config bookmark
-          return chrome.bookmarks.create({
-            parentId: systemFolderId,
-            title: 'Bookmark Set Configuration - DO NOT MODIFY',
-            url: GUID_PREFIX + guid
+            }
+          })
+          .catch(error => {
+            console.error('Error finding folder by GUID:', error);
+            reject(error);
           });
-        });
-    });
-};
-
-// Get a short name for a folder
-const getShortName = (folderId) => {
-  return new Promise(resolve => {
-    chrome.bookmarks.get(folderId, (results) => {
-      const folder = results[0];
-      resolve(folder ? folder.title : 'Bookmark Bar');
-    });
+      })
+      .catch(error => {
+        console.error('Error getting bookmarks bar:', error);
+        reject(error);
+      });
   });
-};
-
-// Fix for the Invalid URL error - ensure URL is valid before creating bookmark
-const createBookmarkSafely = (parentId, title, url) => {
-  // Check if URL is valid
-  try {
-    // Try to create a URL object to validate it
-    new URL(url);
-    
-    // URL is valid, create the bookmark
-    return chrome.bookmarks.create({
-      parentId,
-      title,
-      url
-    });
-  } catch (error) {
-    console.error(`Invalid URL detected: ${url}`);
-    
-    // Create a placeholder bookmark instead
-    const safeUrl = 'about:blank#invalid-' + encodeURIComponent(url);
-    return chrome.bookmarks.create({
-      parentId,
-      title: title + ' [INVALID URL]',
-      url: safeUrl
-    });
-  }
-};
-
-// Get all bookmarks in a folder, excluding the GUID bookmark
-const getAllBookmarksInFolder = (folderId) => {
-  return chrome.bookmarks.getSubTree(folderId)
-    .then(results => {
-      const folder = results[0];
-      let bookmarks = [];
-      
-      const processNode = (node) => {
-        if (node.url) {
-          // Skip GUID bookmarks
-          if (!node.url.startsWith(GUID_PREFIX) && !node.url.startsWith('GUID_TRACKER:')) {
-            // This is a bookmark
-            bookmarks.push({
-              url: node.url,
-              title: node.title
-            });
-          }
-        } else if (node.children) {
-          // This is a folder, process its children
-          node.children.forEach(processNode);
-        }
-      };
-      
-      processNode(folder);
-      return bookmarks;
-    });
-};
-
-// Clear the Bookmarks Bar
-const clearBookmarksBar = (bookmarksBar) => {
-  if (!bookmarksBar.children || bookmarksBar.children.length === 0) {
-    return Promise.resolve();
-  }
-  
-  // Remove all children of the bookmarks bar
-  const removePromises = bookmarksBar.children.map(node => {
-    if (node.children && node.children.length > 0) {
-      return chrome.bookmarks.removeTree(node.id);
-    } else {
-      return chrome.bookmarks.remove(node.id);
-    }
-  });
-  
-  return Promise.all(removePromises);
-};
-
-// Add new bookmarks to the Bookmarks Bar
-const addNewBookmarks = (bookmarks) => {
-  // Process bookmarks one by one, adding them directly to the Bookmarks Bar
-  return bookmarks.reduce((promise, bookmark) => {
-    return promise.then(() => {
-      // Add the bookmark directly to the Bookmarks Bar
-      return createBookmarkSafely(
-        BOOKMARKS_BAR_ID,
-        bookmark.title,
-        bookmark.url
-      );
-    });
-  }, Promise.resolve());
 };
