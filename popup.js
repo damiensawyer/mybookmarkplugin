@@ -57,24 +57,29 @@ const migrateSystemFolder = (oldFolderId) => {
         return Promise.resolve();
       }
       
-      // Move each bookmark to the new system folder
-      const movePromises = oldFolder.children.map(child => {
-        if (child.url) {
-          // Copy the bookmark to new system folder
-          return chrome.bookmarks.create({
-            parentId: systemFolderId,
-            title: child.title,
-            url: child.url
-          })
-          .catch(error => {
-            console.log(`Error copying bookmark ${child.title}:`, error);
-            // Continue with other bookmarks
-          });
-        }
-        return Promise.resolve();
-      });
+      // Only look for the GUID bookmark to migrate
+      let guidBookmark = null;
       
-      return Promise.all(movePromises);
+      for (const child of oldFolder.children) {
+        if (child.url && 
+           (child.url.startsWith(GUID_PREFIX) || child.url.startsWith('GUID_TRACKER:'))) {
+          guidBookmark = child;
+          break;
+        }
+      }
+      
+      if (!guidBookmark) {
+        return Promise.resolve();
+      }
+      
+      // Create the GUID bookmark in the new system folder
+      return chrome.bookmarks.create({
+        parentId: systemFolderId,
+        title: 'Bookmark Set Configuration - DO NOT MODIFY',
+        url: guidBookmark.url.startsWith(GUID_PREFIX) 
+          ? guidBookmark.url 
+          : GUID_PREFIX + guidBookmark.url.substring('GUID_TRACKER:'.length)
+      });
     });
 };
 
@@ -82,20 +87,24 @@ const migrateSystemFolder = (oldFolderId) => {
 const migrateLegacyGuid = (legacyInfo) => {
   console.log('Found legacy GUID bookmark in bookmark bar, migrating to system folder');
   
-  // Create a new bookmark in the system folder
-  return chrome.bookmarks.create({
-    parentId: systemFolderId,
-    title: 'Bookmark Set Configuration - DO NOT MODIFY',
-    url: GUID_PREFIX + legacyInfo.guid
-  })
-  .then(() => {
-    // Try to remove the old bookmark
-    return chrome.bookmarks.remove(legacyInfo.id)
-      .catch(error => {
-        console.log('Error removing legacy GUID bookmark:', error);
-        // Continue even if removal fails
+  // First clean the system folder
+  return cleanSystemFolder({ id: systemFolderId, children: [] })
+    .then(() => {
+      // Create a new bookmark in the system folder
+      return chrome.bookmarks.create({
+        parentId: systemFolderId,
+        title: 'Bookmark Set Configuration - DO NOT MODIFY',
+        url: GUID_PREFIX + legacyInfo.guid
+      })
+      .then(() => {
+        // Try to remove the old bookmark
+        return chrome.bookmarks.remove(legacyInfo.id)
+          .catch(error => {
+            console.log('Error removing legacy GUID bookmark:', error);
+            // Continue even if removal fails
+          });
       });
-  });
+    });
 };// Constants for Chrome bookmarks
 const BOOKMARKS_BAR_ID = '1';
 const OTHER_BOOKMARKS_ID = '2';
@@ -214,7 +223,10 @@ const ensureSystemFolderExists = () => {
         for (const child of otherBookmarks.children) {
           if (!child.url && child.title === SYSTEM_FOLDER_NAME) {
             systemFolderId = child.id;
-            return Promise.resolve();
+            
+            // Clean up the system folder - it should only contain the GUID
+            return cleanSystemFolder(child)
+              .then(() => Promise.resolve());
           }
         }
       }
@@ -233,6 +245,44 @@ const ensureSystemFolderExists = () => {
       // Look for and migrate any system folder in bookmark bar
       return checkAndMigrateFromBookmarkBar();
     });
+};
+
+// Clean the system folder to ensure it only contains GUID configuration
+const cleanSystemFolder = (folder) => {
+  if (!folder.children || folder.children.length === 0) {
+    return Promise.resolve();
+  }
+  
+  // Find the GUID bookmark to preserve
+  let guidBookmark = null;
+  
+  for (const child of folder.children) {
+    if (child.url && 
+       (child.url.startsWith(GUID_PREFIX) || child.url.startsWith('GUID_TRACKER:'))) {
+      guidBookmark = child;
+      break;
+    }
+  }
+  
+  // Remove all non-GUID bookmarks from the folder
+  const removePromises = [];
+  
+  for (const child of folder.children) {
+    // Skip the GUID bookmark if found
+    if (guidBookmark && child.id === guidBookmark.id) {
+      continue;
+    }
+    
+    removePromises.push(
+      chrome.bookmarks.remove(child.id)
+        .catch(error => {
+          console.log(`Error removing ${child.title} from system folder:`, error);
+          // Continue with other removals
+        })
+    );
+  }
+  
+  return Promise.all(removePromises);
 };
 
 // Verify that the active folder exists, repair if not
@@ -976,36 +1026,27 @@ const updateSystemFolderGuid = (guid, originalFolderId) => {
     .then(results => {
       const systemFolder = results[0];
       
-      // Find existing GUID bookmark
-      let guidBookmarkId = null;
+      // First clean the system folder - it should only contain the config bookmark
+      const cleanPromises = [];
       
       if (systemFolder.children) {
         for (const child of systemFolder.children) {
-          if (child.url && 
-             (child.url.startsWith(GUID_PREFIX) || child.url.startsWith('GUID_TRACKER:'))) {
-            guidBookmarkId = child.id;
-            break;
-          }
+          // We'll recreate the config bookmark, so remove everything for now
+          cleanPromises.push(
+            chrome.bookmarks.remove(child.id)
+              .catch(err => console.log(`Could not remove ${child.title}:`, err))
+          );
         }
       }
       
-      // Get folder name for reference
-      return getShortName(originalFolderId)
-        .then(folderName => {
-          if (guidBookmarkId) {
-            // Update existing bookmark
-            return chrome.bookmarks.update(guidBookmarkId, {
-              title: 'Bookmark Set Configuration - DO NOT MODIFY',
-              url: GUID_PREFIX + guid
-            });
-          } else {
-            // Create new bookmark
-            return chrome.bookmarks.create({
-              parentId: systemFolderId,
-              title: 'Bookmark Set Configuration - DO NOT MODIFY',
-              url: GUID_PREFIX + guid
-            });
-          }
+      return Promise.all(cleanPromises)
+        .then(() => {
+          // Create new config bookmark
+          return chrome.bookmarks.create({
+            parentId: systemFolderId,
+            title: 'Bookmark Set Configuration - DO NOT MODIFY',
+            url: GUID_PREFIX + guid
+          });
         });
     });
 };
