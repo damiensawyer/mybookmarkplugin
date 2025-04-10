@@ -114,7 +114,7 @@ const verifyActiveFolder = () => {
   return findFolderByGuid(activeFolderGuid)
     .then(folderId => {
       if (!folderId) {
-        console.warn('Active folder not found but GUID exists');
+        console.log('Active folder not found but GUID exists');
         
         // Get current bookmarks to preserve them
         return chrome.bookmarks.getSubTree(BOOKMARKS_BAR_ID)
@@ -608,7 +608,7 @@ const saveActiveBookmarksState = () => {
       return findFolderByGuid(activeFolderGuid)
         .then(folderId => {
           if (!folderId) {
-            console.warn('Original folder not found, creating recovery folder');
+            console.log('Original folder not found, creating recovery folder');
             return createRecoveryFolder(activeFolderGuid, currentBookmarks);
           }
           
@@ -782,7 +782,7 @@ const setNewActiveFolder = (folderId) => {
           }
         })
         .catch(error => {
-          console.warn('Could not mark active folder in UI:', error);
+          console.log('Could not mark active folder in UI:', error);
           // Continue without marking active folder in UI
         });
     })
