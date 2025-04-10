@@ -93,11 +93,24 @@ const getAllBookmarksInFolder = (folderId) => {
 
 // Clear the Bookmarks Bar
 const clearBookmarksBar = (bookmarksBar) => {
-  const promises = bookmarksBar.children
-    ? bookmarksBar.children.map(node => chrome.bookmarks.remove(node.id))
-    : [];
+  if (!bookmarksBar.children || bookmarksBar.children.length === 0) {
+    return Promise.resolve();
+  }
   
-  return Promise.all(promises);
+  // Process nodes recursively to remove children first, then parents
+  const removeNode = (node) => {
+    if (node.children && node.children.length > 0) {
+      // Process all children first
+      return Promise.all(node.children.map(removeNode))
+        .then(() => chrome.bookmarks.removeTree(node.id));
+    } else {
+      // Leaf node (bookmark) or empty folder
+      return chrome.bookmarks.remove(node.id);
+    }
+  };
+  
+  // Remove all children of the bookmarks bar
+  return Promise.all(bookmarksBar.children.map(removeNode));
 };
 
 // Add new bookmarks to the Bookmarks Bar
