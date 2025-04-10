@@ -2,6 +2,7 @@
 const BOOKMARKS_BAR_ID = '1';
 const OTHER_BOOKMARKS_ID = '2';
 const GUID_PREFIX = 'https://bookmark-tracker.extension/guid/';
+const SYSTEM_FOLDER_NAME = 'System Config (Do Not Delete)';
 
 // DOM elements
 const foldersContainer = document.getElementById('folders');
@@ -9,6 +10,7 @@ const statusElement = document.getElementById('status');
 
 // Global state
 let activeFolderGuid = null;
+let systemFolderId = null;
 
 // Initialize the popup
 document.addEventListener('DOMContentLoaded', () => {
@@ -41,8 +43,8 @@ const performHealthCheck = () => {
   // First, ensure all folders in Other Bookmarks have GUID trackers
   return ensureAllFoldersHaveGuids()
     .then(() => {
-      // Then, ensure bookmark bar has a GUID tracker
-      return ensureBookmarkBarHasGuid();
+      // Then, ensure bookmark bar has a system folder with GUID tracker
+      return ensureBookmarkBarHasSystemFolder();
     });
 };
 
@@ -60,35 +62,114 @@ const ensureAllFoldersHaveGuids = () => {
     });
 };
 
-// Ensure bookmark bar has a GUID tracker, if not create one with a new folder
-const ensureBookmarkBarHasGuid = () => {
+// Ensure bookmark bar has a system folder with GUID tracker
+const ensureBookmarkBarHasSystemFolder = () => {
   return chrome.bookmarks.getSubTree(BOOKMARKS_BAR_ID)
     .then(results => {
       const bookmarksBar = results[0];
       
-      // Look for GUID bookmark
-      return findGuidBookmark(bookmarksBar)
-        .then(guid => {
-          if (!guid) {
-            console.log('No GUID found in bookmark bar, creating a default folder...');
-            // No GUID found, create a default folder and set it as active
-            return createDefaultFolder()
-              .then(folderId => {
-                return getOrCreateFolderGuid(folderId)
-                  .then(guid => {
-                    // Add the GUID bookmark to the bookmark bar
-                    return chrome.bookmarks.create({
-                      parentId: BOOKMARKS_BAR_ID,
-                      title: '📋 Automatically Created',
-                      url: GUID_PREFIX + guid
-                    })
-                    .then(() => guid);
-                  });
-              });
+      // First look for existing system folder
+      return findSystemFolder(bookmarksBar)
+        .then(folderId => {
+          if (folderId) {
+            systemFolderId = folderId;
+            return chrome.bookmarks.getSubTree(folderId);
+          } else {
+            // Create system folder if not found
+            return chrome.bookmarks.create({
+              parentId: BOOKMARKS_BAR_ID,
+              title: SYSTEM_FOLDER_NAME
+            }).then(newFolder => {
+              systemFolderId = newFolder.id;
+              return chrome.bookmarks.getSubTree(systemFolderId);
+            });
           }
-          return guid;
+        })
+        .then(results => {
+          const systemFolder = results[0];
+          // Look for GUID bookmark within system folder
+          return findGuidBookmark(systemFolder)
+            .then(guid => {
+              if (!guid) {
+                console.log('No GUID found in system folder, creating a default folder...');
+                // No GUID found, create a default folder and set it as active
+                return createDefaultFolder()
+                  .then(folderId => {
+                    return getOrCreateFolderGuid(folderId)
+                      .then(guid => {
+                        // Add the GUID bookmark to the system folder
+                        return chrome.bookmarks.create({
+                          parentId: systemFolderId,
+                          title: 'Bookmark Set Configuration - DO NOT MODIFY',
+                          url: GUID_PREFIX + guid
+                        })
+                        .then(() => guid);
+                      });
+                  });
+              }
+              return guid;
+            });
         });
     });
+};
+
+// Find system folder within bookmark bar
+const findSystemFolder = (bookmarksBar) => {
+  if (!bookmarksBar.children || bookmarksBar.children.length === 0) {
+    return Promise.resolve(null);
+  }
+  
+  // Look for system folder
+  for (const child of bookmarksBar.children) {
+    if (!child.url && child.title === SYSTEM_FOLDER_NAME) {
+      return Promise.resolve(child.id);
+    }
+  }
+  
+  // Also check for legacy GUID bookmark to migrate
+  return findLegacyGuidBookmark(bookmarksBar)
+    .then(legacyInfo => {
+      if (legacyInfo) {
+        // Create new system folder
+        return chrome.bookmarks.create({
+          parentId: BOOKMARKS_BAR_ID,
+          title: SYSTEM_FOLDER_NAME
+        }).then(folder => {
+          // Move legacy GUID bookmark into the folder with updated title
+          return chrome.bookmarks.update(legacyInfo.id, {
+            title: 'Bookmark Set Configuration - DO NOT MODIFY'
+          }).then(() => {
+            return chrome.bookmarks.move(legacyInfo.id, {
+              parentId: folder.id
+            }).then(() => folder.id);
+          });
+        });
+      }
+      return null;
+    });
+};
+
+// Find legacy GUID bookmark (for migration)
+const findLegacyGuidBookmark = (folder) => {
+  if (!folder.children || folder.children.length === 0) {
+    return Promise.resolve(null);
+  }
+  
+  for (const child of folder.children) {
+    if (child.url) {
+      // Check for any format of GUID bookmark
+      if (child.url.startsWith(GUID_PREFIX) || child.url.startsWith('GUID_TRACKER:')) {
+        return Promise.resolve({
+          id: child.id,
+          guid: child.url.startsWith(GUID_PREFIX) 
+            ? child.url.substring(GUID_PREFIX.length)
+            : child.url.substring('GUID_TRACKER:'.length)
+        });
+      }
+    }
+  }
+  
+  return Promise.resolve(null);
 };
 
 // Add error recovery function to the initialization process
@@ -188,11 +269,14 @@ const createDefaultFolder = () => {
         
         if (bookmarksBar.children) {
           for (const child of bookmarksBar.children) {
-            if (child.url && !child.url.startsWith(GUID_PREFIX)) {
-              bookmarks.push({
-                url: child.url,
-                title: child.title
-              });
+            // Skip system folder
+            if (child.title !== SYSTEM_FOLDER_NAME) {
+              if (child.url) {
+                bookmarks.push({
+                  url: child.url,
+                  title: child.title
+                });
+              }
             }
           }
         }
@@ -252,14 +336,36 @@ const checkActiveFolder = () => {
     .then(results => {
       const bookmarksBar = results[0];
       
-      // Look for GUID bookmark
-      return findGuidBookmark(bookmarksBar);
-    })
-    .then(guid => {
-      if (guid) {
-        activeFolderGuid = guid;
-        console.log('Active folder GUID:', activeFolderGuid);
-      }
+      // First check system folder
+      return findSystemFolder(bookmarksBar)
+        .then(folderId => {
+          if (folderId) {
+            systemFolderId = folderId;
+            return chrome.bookmarks.getSubTree(folderId);
+          }
+          return { children: [] }; // Empty placeholder
+        })
+        .then(results => {
+          const systemFolder = results[0];
+          
+          // Look for GUID bookmark
+          return findGuidBookmark(systemFolder);
+        })
+        .then(guid => {
+          if (guid) {
+            activeFolderGuid = guid;
+            console.log('Active folder GUID:', activeFolderGuid);
+          } else {
+            // Legacy fallback - check directly in bookmark bar
+            return findGuidBookmark(bookmarksBar)
+              .then(barGuid => {
+                if (barGuid) {
+                  activeFolderGuid = barGuid;
+                  console.log('Legacy active folder GUID found:', activeFolderGuid);
+                }
+              });
+          }
+        });
     });
 };
 
@@ -312,7 +418,7 @@ const getOrCreateFolderGuid = (folderId) => {
           // Create GUID bookmark in the folder
           return chrome.bookmarks.create({
             parentId: folderId,
-            title: '📋 Bookmark Bar Config',
+            title: 'Bookmark Set Configuration - DO NOT MODIFY',
             url: GUID_PREFIX + newGuid
           })
           .then(() => newGuid);
@@ -363,14 +469,16 @@ const saveActiveBookmarksState = () => {
       const bookmarksBar = results[0];
       const currentBookmarks = [];
       
-      // Skip the GUID bookmark
+      // Skip the system folder
       if (bookmarksBar.children) {
         for (const child of bookmarksBar.children) {
-          if (child.url && !child.url.startsWith(GUID_PREFIX)) {
-            currentBookmarks.push({
-              url: child.url,
-              title: child.title
-            });
+          if (child.id !== systemFolderId) {
+            if (child.url) {
+              currentBookmarks.push({
+                url: child.url,
+                title: child.title
+              });
+            }
           }
         }
       }
@@ -469,21 +577,19 @@ const setNewActiveFolder = (folderId) => {
       // Get all bookmarks in the selected folder
       return getAllBookmarksInFolder(folderId)
         .then(newBookmarks => {
-          // Clear the bookmarks bar and add the new bookmarks
+          // Clear the bookmarks bar while preserving the system folder
           return chrome.bookmarks.getSubTree(BOOKMARKS_BAR_ID)
             .then(results => {
               const bookmarksBar = results[0];
-              return clearBookmarksBar(bookmarksBar)
+              return clearBookmarksBarExceptSystem(bookmarksBar)
                 .then(() => {
-                  // Add the GUID bookmark to the bookmark bar
-                  return getShortName(folderId)
-                    .then(folderName => {
-                      return chrome.bookmarks.create({
-                        parentId: BOOKMARKS_BAR_ID,
-                        title: '📋 ' + folderName,
-                        url: GUID_PREFIX + guid
-                      });
-                    });
+                  // Ensure system folder exists and contains GUID
+                  if (!systemFolderId) {
+                    return ensureBookmarkBarHasSystemFolder();
+                  } else {
+                    // Update the GUID in the system folder
+                    return updateSystemFolderGuid(guid, folderId);
+                  }
                 })
                 .then(() => addNewBookmarks(newBookmarks));
             });
@@ -513,6 +619,46 @@ const setNewActiveFolder = (folderId) => {
     .catch(error => {
       statusElement.textContent = `Error switching bookmarks: ${error.message}`;
       console.error('Error switching bookmarks:', error);
+    });
+};
+
+// Update the GUID bookmark in the system folder
+const updateSystemFolderGuid = (guid, originalFolderId) => {
+  return chrome.bookmarks.getSubTree(systemFolderId)
+    .then(results => {
+      const systemFolder = results[0];
+      
+      // Find existing GUID bookmark
+      let guidBookmarkId = null;
+      
+      if (systemFolder.children) {
+        for (const child of systemFolder.children) {
+          if (child.url && 
+             (child.url.startsWith(GUID_PREFIX) || child.url.startsWith('GUID_TRACKER:'))) {
+            guidBookmarkId = child.id;
+            break;
+          }
+        }
+      }
+      
+      // Get folder name for reference
+      return getShortName(originalFolderId)
+        .then(folderName => {
+          if (guidBookmarkId) {
+            // Update existing bookmark
+            return chrome.bookmarks.update(guidBookmarkId, {
+              title: 'Bookmark Set Configuration - DO NOT MODIFY',
+              url: GUID_PREFIX + guid
+            });
+          } else {
+            // Create new bookmark
+            return chrome.bookmarks.create({
+              parentId: systemFolderId,
+              title: 'Bookmark Set Configuration - DO NOT MODIFY',
+              url: GUID_PREFIX + guid
+            });
+          }
+        });
     });
 };
 
@@ -562,7 +708,7 @@ const getAllBookmarksInFolder = (folderId) => {
       const processNode = (node) => {
         if (node.url) {
           // Skip GUID bookmarks
-          if (!node.url.startsWith(GUID_PREFIX)) {
+          if (!node.url.startsWith(GUID_PREFIX) && !node.url.startsWith('GUID_TRACKER:')) {
             // This is a bookmark
             bookmarks.push({
               url: node.url,
@@ -580,14 +726,19 @@ const getAllBookmarksInFolder = (folderId) => {
     });
 };
 
-// Clear the Bookmarks Bar
-const clearBookmarksBar = (bookmarksBar) => {
+// Clear the Bookmarks Bar except for system folder
+const clearBookmarksBarExceptSystem = (bookmarksBar) => {
   if (!bookmarksBar.children || bookmarksBar.children.length === 0) {
     return Promise.resolve();
   }
   
-  // Remove all children of the bookmarks bar
+  // Remove all children of the bookmarks bar except system folder
   const removePromises = bookmarksBar.children.map(node => {
+    // Skip the system folder
+    if (node.id === systemFolderId) {
+      return Promise.resolve();
+    }
+    
     if (node.children && node.children.length > 0) {
       return chrome.bookmarks.removeTree(node.id);
     } else {
