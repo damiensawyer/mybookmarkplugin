@@ -9,6 +9,9 @@ An enhanced Chrome extension that allows you to maintain multiple bookmark sets 
 - **Visual indication**: Active bookmark set is highlighted in the extension popup
 - **Stability across devices**: Uses a GUID tracking system that works with Chrome Sync
 - **Preserves your workflow**: Switch contexts without losing your bookmark organization
+- **Health check system**: Automatically ensures all folders have proper tracking identifiers
+- **Automatic folder creation**: Creates a default folder if bookmark bar has no associated folder
+- **Error handling**: Gracefully handles invalid URLs and other common issues
 
 ## How It Works
 
