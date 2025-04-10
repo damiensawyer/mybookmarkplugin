@@ -115,55 +115,14 @@ const clearBookmarksBar = (bookmarksBar) => {
 
 // Add new bookmarks to the Bookmarks Bar
 const addNewBookmarks = (bookmarks) => {
-  // Create a map to track folders we need to create
-  const folderMap = new Map();
-  folderMap.set('', BOOKMARKS_BAR_ID); // Root folder is the bookmarks bar
-  
-  // Process bookmarks one by one, creating necessary folders
+  // Process bookmarks one by one, adding them directly to the Bookmarks Bar
   return bookmarks.reduce((promise, bookmark) => {
     return promise.then(() => {
-      // Parse the path to determine folder structure
-      const parts = bookmark.path.split('/');
-      const bookmarkTitle = parts.pop(); // Last part is the bookmark name
-      
-      // Build the folder path progressively
-      let currentPath = '';
-      
-      // Create all necessary folders in the path
-      return parts.reduce((folderPromise, folderName) => {
-        return folderPromise.then(() => {
-          // Update the current path
-          currentPath = currentPath ? `${currentPath}/${folderName}` : folderName;
-          
-          // Check if we've already created this folder
-          if (folderMap.has(currentPath)) {
-            return Promise.resolve(folderMap.get(currentPath));
-          }
-          
-          // Get the parent folder ID
-          const parentPath = currentPath.split('/').slice(0, -1).join('/');
-          const parentId = folderMap.get(parentPath);
-          
-          // Create the folder
-          return chrome.bookmarks.create({
-            parentId,
-            title: folderName
-          }).then(newFolder => {
-            folderMap.set(currentPath, newFolder.id);
-            return newFolder.id;
-          });
-        });
-      }, Promise.resolve())
-      .then(() => {
-        // Now create the bookmark in the appropriate folder
-        const parentPath = parts.join('/');
-        const parentId = folderMap.get(parentPath);
-        
-        return chrome.bookmarks.create({
-          parentId,
-          title: bookmarkTitle,
-          url: bookmark.url
-        });
+      // Add the bookmark directly to the Bookmarks Bar
+      return chrome.bookmarks.create({
+        parentId: BOOKMARKS_BAR_ID,
+        title: bookmark.title,
+        url: bookmark.url
       });
     });
   }, Promise.resolve());

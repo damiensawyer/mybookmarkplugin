@@ -6,14 +6,11 @@
     "permissions": ["bookmarks"],
     "action": {
       "default_popup": "popup.html",
-      "default_icon": {
-        "16": "icon16.jpeg",
-        "48": "icon48.jpeg",
-        "128": "icon128.jpeg"
-      }
+      "default_icon": "icon128.jpeg"
     },
     "icons": {
       "16": "icon16.jpeg",
+      "32": "icon32.jpeg",
       "48": "icon48.jpeg",
       "128": "icon128.jpeg"
     }
