@@ -600,8 +600,10 @@ const loadFolders = () => {
   chrome.bookmarks.getSubTree(OTHER_BOOKMARKS_ID, (results) => {
     const otherBookmarks = results[0];
     
-    // Get all folders within Other Bookmarks
-    const folders = otherBookmarks.children?.filter(node => !node.url) || [];
+    // Get all folders within Other Bookmarks, excluding the system folder
+    const folders = otherBookmarks.children?.filter(node => 
+      !node.url && node.title !== SYSTEM_FOLDER_NAME
+    ) || [];
     
     if (folders.length === 0) {
       foldersContainer.innerHTML = '<p>No folders found in Other Bookmarks</p>';
