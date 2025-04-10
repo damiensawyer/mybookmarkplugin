@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Bookmark Folder Copier</title>
+  <style>
+    body {
+      width: 300px;
+      font-family: Arial, sans-serif;
+      padding: 10px;
+    }
+    .folder {
+      cursor: pointer;
+      padding: 8px;
+      margin: 4px 0;
+      background-color: #f0f0f0;
+      border-radius: 4px;
+      transition: background-color 0.2s;
+    }
+    .folder:hover {
+      background-color: #e0e0e0;
+    }
+    #status {
+      margin-top: 10px;
+      color: #4CAF50;
+      font-weight: bold;
+      min-height: 20px;
+    }
+    h3 {
+      margin-top: 0;
+    }
+  </style>
+</head>
+<body>
+  <h3>Select folder to copy to Bookmarks Bar:</h3>
+  <div id="folders"></div>
+  <div id="status"></div>
+  <script src="popup.js"></script>
+</body>
+</html>
