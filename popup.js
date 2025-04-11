@@ -1038,9 +1038,11 @@ const loadFolders = () => {
   chrome.bookmarks.getSubTree(OTHER_BOOKMARKS_ID, (results) => {
     const otherBookmarks = results[0];
     
-    // Get all folders within Other Bookmarks, excluding the system folder
+    // Get all folders within Other Bookmarks, excluding the system folder and recovered sets
     const folders = otherBookmarks.children?.filter(node => 
-      !node.url && node.title !== SYSTEM_FOLDER_NAME
+      !node.url && 
+      node.title !== SYSTEM_FOLDER_NAME && 
+      !node.title.startsWith('Recovered Set')
     ) || [];
     
     if (folders.length === 0) {
