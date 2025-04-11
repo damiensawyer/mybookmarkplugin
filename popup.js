@@ -454,33 +454,50 @@ const saveOrphanedBookmarks = (bookmarks) => {
 
 // Find a folder by its GUID
 const findFolderByGuid = (guid) => {
+  console.log(`Finding folder for GUID: ${guid}`);
   // This will search in Other Bookmarks for a folder containing the GUID
   return chrome.bookmarks.getSubTree(OTHER_BOOKMARKS_ID)
     .then(results => {
       const otherBookmarks = results[0];
       
       if (!otherBookmarks.children) {
+        console.log('Other Bookmarks has no children');
         return null;
       }
       
-      // Only check folders
-      const folders = otherBookmarks.children.filter(node => !node.url);
+      console.log(`Searching through ${otherBookmarks.children.length} items in Other Bookmarks`);
       
-      // Check each folder for the GUID
-      return Promise.all(folders.map(folder => {
-        return findGuidBookmark(folder)
-          .then(folderGuid => {
-            if (folderGuid === guid) {
-              return folder.id;
+      // Check each folder in Other Bookmarks
+      for (const folder of otherBookmarks.children) {
+        // Skip bookmarks, only check folders
+        if (folder.url) {
+          continue;
+        }
+        
+        // Skip the system folder - we don't want to find GUIDs in the system folder
+        if (folder.title === SYSTEM_FOLDER_NAME) {
+          console.log(`Skipping system folder: ${folder.title} (ID: ${folder.id})`);
+          continue;
+        }
+        
+        console.log(`Checking folder: ${folder.title} (ID: ${folder.id})`);
+        
+        // Check if this folder has the GUID bookmark
+        if (folder.children) {
+          for (const child of folder.children) {
+            if (child.url) {
+              console.log(`Checking bookmark: ${child.title}, URL: ${child.url}`);
+              if (child.url === GUID_PREFIX + guid || child.url === 'GUID_TRACKER:' + guid) {
+                console.log(`Found matching folder: ${folder.title} (ID: ${folder.id})`);
+                return folder.id;
+              }
             }
-            return null;
-          });
-      }))
-      .then(results => {
-        // Filter out nulls and return the first match
-        const matches = results.filter(id => id !== null);
-        return matches.length > 0 ? matches[0] : null;
-      });
+          }
+        }
+      }
+      
+      console.log(`No folder found for GUID: ${guid}`);
+      return null;
     });
 };
 
@@ -1210,9 +1227,12 @@ const addDiagnosticMessage = (message) => {
 const switchToFolder = (newFolderId) => {
   // Show status indicator
   statusElement.textContent = 'Saving current bookmarks...';
+  console.log(`Switching to folder ID: ${newFolderId}`);
   
   // If there's an active folder, save its state first
   if (activeFolderGuid) {
+    console.log(`Active folder GUID exists: ${activeFolderGuid}`);
+
     // First get the current bookmark bar state
     chrome.bookmarks.getSubTree(BOOKMARKS_BAR_ID)
       .then(results => {
@@ -1240,11 +1260,19 @@ const switchToFolder = (newFolderId) => {
               // This is a recovery situation, not an error
               statusElement.textContent = 'Bookmark set folder missing - saving orphaned bookmarks';
               console.log('Bookmark set folder not found - saving orphaned bookmarks');
+              console.log(`Current bookmarks count: ${currentBookmarks.length}`);
               
               // First save to orphaned bookmarks folder
+              console.log('Calling saveOrphanedBookmarks...');
               return saveOrphanedBookmarks(currentBookmarks)
                 .then(() => {
+                  console.log('saveOrphanedBookmarks completed, now creating recovery folder...');
                   // Then create a recovery folder
+                  return createRecoveryFolder(activeFolderGuid, currentBookmarks);
+                })
+                .catch(error => {
+                  console.error('Error in orphaned bookmarks flow:', error);
+                  // Continue with recovery folder even if orphaned bookmarks fails
                   return createRecoveryFolder(activeFolderGuid, currentBookmarks);
                 });
             }
