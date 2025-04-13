@@ -154,6 +154,17 @@ const getShortName = (folderId) => {
 
 // Fix for the Invalid URL error - ensure URL is valid before creating bookmark
 const createBookmarkSafely = (parentId, title, url) => {
+  // If URL is undefined, this is likely a folder - this should never happen but just in case
+  if (typeof url === 'undefined') {
+    console.warn('createBookmarkSafely called with undefined URL - this should not happen');
+    // Create a bookmark with a safe URL
+    return chrome.bookmarks.create({
+      parentId,
+      title,
+      url: 'about:blank#invalid-undefined'
+    });
+  }
+  
   // Check if URL is valid
   try {
     // Try to create a URL object to validate it
@@ -169,7 +180,7 @@ const createBookmarkSafely = (parentId, title, url) => {
     console.error(`Invalid URL detected: ${url}`);
     
     // Create a placeholder bookmark instead
-    const safeUrl = 'about:blank#invalid-' + encodeURIComponent(url);
+    const safeUrl = 'about:blank#invalid-' + encodeURIComponent(url || '');
     return chrome.bookmarks.create({
       parentId,
       title: title + ' [INVALID URL]',
@@ -185,23 +196,61 @@ const getAllBookmarksInFolder = (folderId) => {
       const folder = results[0];
       let bookmarks = [];
       
-      const processNode = (node) => {
+      // Process a node and return its structure
+      const processNode = (node, isRoot = false) => {
+        // Skip processing the root node itself, but process its children
+        if (isRoot) {
+          if (node.children) {
+            // Process each child of the root folder
+            node.children.forEach(child => {
+              const processedChild = processNode(child);
+              if (processedChild) {
+                bookmarks.push(processedChild);
+              }
+            });
+          }
+          return null;
+        }
+        
+        // Handle bookmark (leaf node)
         if (node.url) {
           // Skip GUID bookmarks
           if (!node.url.startsWith(GUID_PREFIX) && !node.url.startsWith('GUID_TRACKER:')) {
-            // This is a bookmark
-            bookmarks.push({
+            return {
               url: node.url,
               title: node.title
-            });
+            };
           }
-        } else if (node.children) {
-          // This is a folder, process its children
-          node.children.forEach(processNode);
+          return null; // Skip GUID bookmarks
         }
+        
+        // Handle folder (has children)
+        if (node.children) {
+          const folderItem = {
+            isFolder: true,
+            title: node.title,
+            children: []
+          };
+          
+          // Process all children of this folder
+          node.children.forEach(child => {
+            const processedChild = processNode(child);
+            if (processedChild) {
+              folderItem.children.push(processedChild);
+            }
+          });
+          
+          // Only return the folder if it has children
+          if (folderItem.children.length > 0) {
+            return folderItem;
+          }
+        }
+        
+        return null; // Skip empty folders
       };
       
-      processNode(folder);
+      // Start processing from the root folder
+      processNode(folder, true);
       return bookmarks;
     });
 };
@@ -226,15 +275,27 @@ const clearBookmarksBar = (bookmarksBar) => {
 
 // Add new bookmarks to the Bookmarks Bar
 const addNewBookmarks = (bookmarks) => {
-  // Process bookmarks one by one, adding them directly to the Bookmarks Bar
-  return bookmarks.reduce((promise, bookmark) => {
+  // Process bookmarks and folders one by one, adding them directly to the Bookmarks Bar
+  return bookmarks.reduce((promise, item) => {
     return promise.then(() => {
-      // Add the bookmark directly to the Bookmarks Bar
-      return createBookmarkSafely(
-        BOOKMARKS_BAR_ID,
-        bookmark.title,
-        bookmark.url
-      );
+      if (item.isFolder) {
+        // This is a folder, create it first
+        console.log(`Creating folder in bookmark bar: ${item.title} with ${item.children.length} children`);
+        return chrome.bookmarks.create({
+          parentId: BOOKMARKS_BAR_ID,
+          title: item.title
+        }).then(newFolder => {
+          // Then add all its children
+          return addBookmarksToFolder(item.children, newFolder.id);
+        });
+      } else {
+        // This is a regular bookmark
+        return createBookmarkSafely(
+          BOOKMARKS_BAR_ID,
+          item.title,
+          item.url
+        );
+      }
     });
   }, Promise.resolve());
 };
@@ -505,30 +566,46 @@ const clearFolderExceptGuid = (folder) => {
 
 // Add bookmarks to a folder
 const addBookmarksToFolder = (bookmarks, folderId) => {
-  console.log(`Adding ${bookmarks.length} bookmarks to folder ${folderId}`);
+  console.log(`Adding ${bookmarks.length} bookmarks/folders to folder ${folderId}`);
   
   if (bookmarks.length === 0) {
     console.log('No bookmarks to add');
     return Promise.resolve();
   }
   
-  // Create array of promises for each bookmark creation
-  const createPromises = bookmarks.map(bookmark => {
-    return createBookmarkSafely(
-      folderId,
-      bookmark.title,
-      bookmark.url
-    ).catch(error => {
-      console.error(`Error creating bookmark "${bookmark.title}":`, error);
-      // Continue with other bookmarks even if one fails
-      return Promise.resolve();
+  // Process each bookmark or folder sequentially to maintain order
+  return bookmarks.reduce((promise, bookmark) => {
+    return promise.then(() => {
+      if (bookmark.isFolder) {
+        // This is a folder, create it first - IMPORTANT: Do NOT include url property for folders
+        console.log(`Creating folder: ${bookmark.title} with ${bookmark.children.length} children`);
+        return chrome.bookmarks.create({
+          parentId: folderId,
+          title: bookmark.title
+        }).then(newFolder => {
+          // Then add all its children
+          return addBookmarksToFolder(bookmark.children, newFolder.id);
+        }).catch(error => {
+          console.error(`Error creating folder "${bookmark.title}":`, error);
+          // Continue with other bookmarks even if one fails
+          return Promise.resolve();
+        });
+      } else {
+        // This is a regular bookmark
+        return createBookmarkSafely(
+          folderId,
+          bookmark.title,
+          bookmark.url
+        ).catch(error => {
+          console.error(`Error creating bookmark "${bookmark.title}":`, error);
+          // Continue with other bookmarks even if one fails
+          return Promise.resolve();
+        });
+      }
     });
-  });
-  
-  // Process all bookmarks in parallel for better performance
-  return Promise.all(createPromises)
+  }, Promise.resolve())
     .then(() => {
-      console.log(`Successfully added ${bookmarks.length} bookmarks to folder ${folderId}`);
+      console.log(`Successfully added all bookmarks/folders to folder ${folderId}`);
       return Promise.resolve();
     });
 };
@@ -1218,20 +1295,51 @@ const switchToFolder = (newFolderId) => {
     chrome.bookmarks.getSubTree(BOOKMARKS_BAR_ID)
       .then(results => {
         const bookmarksBar = results[0];
-        const currentBookmarks = [];
+        let currentBookmarks = [];
         
-        // Get all bookmarks from the bar
-        if (bookmarksBar.children) {
-          for (const child of bookmarksBar.children) {
-            if (child.url && 
-                !child.url.startsWith(GUID_PREFIX) && 
-                !child.url.startsWith('GUID_TRACKER:')) {
-              currentBookmarks.push({
-                url: child.url,
-                title: child.title
-              });
+        // Process a node and its children recursively
+        const processBarNode = (node) => {
+          if (node.url) {
+            // Skip GUID bookmarks
+            if (!node.url.startsWith(GUID_PREFIX) && !node.url.startsWith('GUID_TRACKER:')) {
+              return {
+                url: node.url,
+                title: node.title
+              };
+            }
+            return null;
+          } else if (node.children) {
+            // This is a folder
+            const folderItem = {
+              isFolder: true,
+              title: node.title,
+              children: []
+            };
+            
+            // Process all children
+            node.children.forEach(child => {
+              const processedChild = processBarNode(child);
+              if (processedChild) {
+                folderItem.children.push(processedChild);
+              }
+            });
+            
+            // Only return folders with children
+            if (folderItem.children.length > 0) {
+              return folderItem;
             }
           }
+          return null;
+        };
+        
+        // Process all children of the bookmarks bar
+        if (bookmarksBar.children) {
+          bookmarksBar.children.forEach(child => {
+            const processedItem = processBarNode(child);
+            if (processedItem) {
+              currentBookmarks.push(processedItem);
+            }
+          });
         }
         
         // Find the original folder with the active GUID
@@ -1282,24 +1390,54 @@ const saveActiveBookmarksState = () => {
     chrome.bookmarks.getSubTree(BOOKMARKS_BAR_ID)
       .then(results => {
         const bookmarksBar = results[0];
-        const currentBookmarks = [];
+        let currentBookmarks = [];
         
-        // Get all bookmarks from the bar
-        if (bookmarksBar.children) {
-          for (const child of bookmarksBar.children) {
-            // Only include actual bookmarks with URLs, not folders or special items
-            if (child.url && 
-                !child.url.startsWith(GUID_PREFIX) && 
-                !child.url.startsWith('GUID_TRACKER:')) {
-              currentBookmarks.push({
-                url: child.url,
-                title: child.title
-              });
+        // Process a node and its children recursively
+        const processBarNode = (node) => {
+          if (node.url) {
+            // Skip GUID bookmarks
+            if (!node.url.startsWith(GUID_PREFIX) && !node.url.startsWith('GUID_TRACKER:')) {
+              return {
+                url: node.url,
+                title: node.title
+              };
+            }
+            return null;
+          } else if (node.children) {
+            // This is a folder
+            const folderItem = {
+              isFolder: true,
+              title: node.title,
+              children: []
+            };
+            
+            // Process all children
+            node.children.forEach(child => {
+              const processedChild = processBarNode(child);
+              if (processedChild) {
+                folderItem.children.push(processedChild);
+              }
+            });
+            
+            // Only return folders with children
+            if (folderItem.children.length > 0) {
+              return folderItem;
             }
           }
+          return null;
+        };
+        
+        // Process all children of the bookmarks bar
+        if (bookmarksBar.children) {
+          bookmarksBar.children.forEach(child => {
+            const processedItem = processBarNode(child);
+            if (processedItem) {
+              currentBookmarks.push(processedItem);
+            }
+          });
         }
         
-        console.log(`Saving ${currentBookmarks.length} bookmarks to active folder`);
+        console.log(`Saving ${currentBookmarks.length} bookmarks/folders to active folder`);
         
         // Find the original folder with the active GUID
         findFolderByGuid(activeFolderGuid)
