@@ -144,12 +144,19 @@ const updateSystemFolderGuid = (guid, originalFolderId) => {
 
 // Get a short name for a folder
 const getShortName = (folderId) => {
-  return new Promise(resolve => {
-    chrome.bookmarks.get(folderId, (results) => {
+  return chrome.bookmarks.get(folderId)
+    .then(results => {
+      if (!results || results.length === 0) {
+        console.warn(`No bookmark found for ID: ${folderId}`);
+        return 'Bookmark Bar';
+      }
       const folder = results[0];
-      resolve(folder ? folder.title : 'Bookmark Bar');
+      return folder ? folder.title : 'Bookmark Bar';
+    })
+    .catch(error => {
+      console.error(`Error getting bookmark name for ID ${folderId}:`, error);
+      return 'Bookmark Bar';
     });
-  });
 };
 
 // Fix for the Invalid URL error - ensure URL is valid before creating bookmark
@@ -1112,42 +1119,53 @@ const createDefaultFolder = () => {
 
 // Load all folders from "Other Bookmarks"
 const loadFolders = () => {
-  chrome.bookmarks.getSubTree(OTHER_BOOKMARKS_ID, (results) => {
-    const otherBookmarks = results[0];
-    
-    // Get all folders within Other Bookmarks, excluding the system folder and recovered sets
-    const folders = otherBookmarks.children?.filter(node => 
-      !node.url && 
-      node.title !== SYSTEM_FOLDER_NAME && 
-      !node.title.startsWith('Recovered Set')
-    ) || [];
-    
-    if (folders.length === 0) {
-      foldersContainer.innerHTML = '<p>No folders found in Other Bookmarks</p>';
-      return;
-    }
-    
-    // Create folder elements
-    const folderElements = folders.map(folder => {
-      const element = document.createElement('div');
-      element.className = 'folder';
-      element.textContent = folder.title;
-      
-      // Check if this is the active folder
-      getOrCreateFolderGuid(folder.id)
-        .then(guid => {
-          if (guid === activeFolderGuid) {
-            element.classList.add('active');
-          }
-        });
-      
-      element.addEventListener('click', () => switchToFolder(folder.id));
-      return element;
+  chrome.bookmarks.getSubTree(OTHER_BOOKMARKS_ID)
+    .then(results => {
+      if (!results || results.length === 0) {
+        console.error('No results returned from getSubTree');
+        foldersContainer.innerHTML = '<p>Error loading folders: No results</p>';
+        return;
+      }
+
+      const otherBookmarks = results[0];
+
+      // Get all folders within Other Bookmarks, excluding the system folder and recovered sets
+      const folders = otherBookmarks.children?.filter(node =>
+        !node.url &&
+        node.title !== SYSTEM_FOLDER_NAME &&
+        !node.title.startsWith('Recovered Set')
+      ) || [];
+
+      if (folders.length === 0) {
+        foldersContainer.innerHTML = '<p>No folders found in Other Bookmarks</p>';
+        return;
+      }
+
+      // Create folder elements
+      const folderElements = folders.map(folder => {
+        const element = document.createElement('div');
+        element.className = 'folder';
+        element.textContent = folder.title;
+
+        // Check if this is the active folder
+        getOrCreateFolderGuid(folder.id)
+          .then(guid => {
+            if (guid === activeFolderGuid) {
+              element.classList.add('active');
+            }
+          });
+
+        element.addEventListener('click', () => switchToFolder(folder.id));
+        return element;
+      });
+
+      // Add folders to the container
+      folderElements.forEach(element => foldersContainer.appendChild(element));
+    })
+    .catch(error => {
+      console.error('Error loading folders:', error);
+      foldersContainer.innerHTML = '<p>Error loading folders. Please try again.</p>';
     });
-    
-    // Add folders to the container
-    folderElements.forEach(element => foldersContainer.appendChild(element));
-  });
 };
 
 // Check if there's an active folder
