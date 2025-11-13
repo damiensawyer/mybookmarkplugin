@@ -1,6 +1,6 @@
 // Constants for Chrome bookmarks
-const BOOKMARKS_BAR_ID = '1';
-const OTHER_BOOKMARKS_ID = '2';
+let BOOKMARKS_BAR_ID = null;
+let OTHER_BOOKMARKS_ID = null;
 const GUID_PREFIX = 'https://bookmark-tracker.extension/guid/';
 const SYSTEM_FOLDER_NAME = 'Bookmark Set Manager Config';
 
@@ -12,17 +12,47 @@ const statusElement = document.getElementById('status');
 let activeFolderGuid = null;
 let systemFolderId = null;
 
+// Dynamically discover bookmark root IDs (Chrome 134+ uses folderType)
+const discoverBookmarkRoots = () => {
+  return chrome.bookmarks.getTree()
+    .then(tree => {
+      const roots = tree[0].children || [];
+
+      // Find roots by folderType (Chrome 134+) or by title (fallback)
+      for (const node of roots) {
+        if (node.folderType === 'bookmarks-bar' || node.title === 'Bookmarks bar' || node.title === 'Bookmarks Bar') {
+          BOOKMARKS_BAR_ID = node.id;
+          console.log('Found Bookmarks Bar ID:', BOOKMARKS_BAR_ID);
+        } else if (node.folderType === 'other' || node.title === 'Other bookmarks' || node.title === 'Other Bookmarks') {
+          OTHER_BOOKMARKS_ID = node.id;
+          console.log('Found Other Bookmarks ID:', OTHER_BOOKMARKS_ID);
+        }
+      }
+
+      if (!BOOKMARKS_BAR_ID || !OTHER_BOOKMARKS_ID) {
+        throw new Error('Could not find bookmark root folders');
+      }
+
+      return { bookmarksBarId: BOOKMARKS_BAR_ID, otherBookmarksId: OTHER_BOOKMARKS_ID };
+    });
+};
+
 // Initialize the popup
 document.addEventListener('DOMContentLoaded', () => {
-  statusElement.textContent = 'Checking bookmarks...';
-  
+  statusElement.textContent = 'Initializing...';
+
   // Global error handler for uncaught promises
   window.addEventListener('unhandledrejection', function(event) {
     console.error('Unhandled Promise Rejection:', event.reason);
     statusElement.textContent = `Error: ${event.reason.message || 'Unknown error'}`;
   });
-  
-  performHealthCheck()
+
+  // First, discover the bookmark root IDs dynamically
+  discoverBookmarkRoots()
+    .then(() => {
+      statusElement.textContent = 'Checking bookmarks...';
+      return performHealthCheck();
+    })
     .catch(error => {
       console.error('Error during health check:', error);
       statusElement.textContent = `Error during health check: ${error.message}`;
