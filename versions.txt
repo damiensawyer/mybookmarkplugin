@@ -1,4 +1,22 @@
-Fedora Version 142.0.7444.134 
-Lubuntu  142.0.7444.134 
+Fedora Version 142.0.7444.134 --> works
+Lubuntu  142.0.7444.134  --> works
+Windows Version 142.0.7444.163  --> does not work
 
 
+Bookmark Sets
+Error during health check: Can't find bookmark for id.
+;
+
+// Load all folders from "Other Bookmarks"
+const loadFolders = () => {
+  chrome.bookmarks.getSubTree(OTHER_BOOKMARKS_ID, (results) => {
+    const otherBookmarks = results[0];
+    
+
+   console.error('Error during health check:', error);
+
+      .catch(error => {
+        console.error('Error during recovery:', error);
+
+
+Error during recovery: Error: Can't find bookmark for id.
