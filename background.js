@@ -1,3 +1,9 @@
+// ExtensionPay integration (replace 'bookmark-set-manager' if your ExtensionPay ID differs)
+importScripts('ExtPay.js');
+const EXTPAY_ID = 'bookmark-set-manager';
+const extpay = ExtPay(EXTPAY_ID);
+extpay.startBackground();
+
 // Constants for Chrome bookmarks
 let BOOKMARKS_BAR_ID = null;
 let OTHER_BOOKMARKS_ID = null;

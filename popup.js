@@ -1,3 +1,7 @@
+// ExtensionPay integration (replace 'bookmark-set-manager' if your ExtensionPay ID differs)
+const EXTPAY_ID = 'bookmark-set-manager';
+const extpay = ExtPay(EXTPAY_ID);
+
 // Constants for Chrome bookmarks
 let BOOKMARKS_BAR_ID = null;
 let OTHER_BOOKMARKS_ID = null;
@@ -7,10 +11,40 @@ const SYSTEM_FOLDER_NAME = 'Bookmark Set Manager Config';
 // DOM elements
 const foldersContainer = document.getElementById('folders');
 const statusElement = document.getElementById('status');
+const paywallBox = document.getElementById('paywall-box');
+const proBadge = document.getElementById('pro-badge');
+const payButton = document.getElementById('pay-button');
+const loginButton = document.getElementById('login-button');
 
 // Global state
 let activeFolderGuid = null;
 let systemFolderId = null;
+let isUserPaid = false;
+
+// Check user's ExtensionPay license status
+const checkPaymentStatus = () => {
+  return extpay.getUser()
+    .then(user => {
+      isUserPaid = Boolean(user && user.paid);
+      if (isUserPaid) {
+        if (proBadge) proBadge.style.display = 'inline-block';
+        if (paywallBox) paywallBox.style.display = 'none';
+      } else {
+        if (proBadge) proBadge.style.display = 'none';
+        if (paywallBox) paywallBox.style.display = 'block';
+      }
+      // Update any already-rendered folder elements
+      document.querySelectorAll('.folder').forEach(el => {
+        el.classList.toggle('locked', !isUserPaid);
+      });
+      return isUserPaid;
+    })
+    .catch(err => {
+      console.warn('ExtensionPay status check failed:', err);
+      if (paywallBox) paywallBox.style.display = 'block';
+      return false;
+    });
+};
 
 // Dynamically discover bookmark root IDs (Chrome 134+ uses folderType)
 const discoverBookmarkRoots = () => {
@@ -40,6 +74,23 @@ const discoverBookmarkRoots = () => {
 // Initialize the popup
 document.addEventListener('DOMContentLoaded', () => {
   statusElement.textContent = 'Initializing...';
+
+  if (payButton) {
+    payButton.addEventListener('click', (evt) => {
+      evt.preventDefault();
+      extpay.openPaymentPage();
+    });
+  }
+
+  if (loginButton) {
+    loginButton.addEventListener('click', (evt) => {
+      evt.preventDefault();
+      extpay.openLoginPage();
+    });
+  }
+
+  // Check license status in parallel with bookmark initialization
+  checkPaymentStatus();
 
   // Global error handler for uncaught promises
   window.addEventListener('unhandledrejection', function(event) {
@@ -1174,7 +1225,7 @@ const loadFolders = () => {
       // Create folder elements
       const folderElements = folders.map(folder => {
         const element = document.createElement('div');
-        element.className = 'folder';
+        element.className = isUserPaid ? 'folder' : 'folder locked';
         element.textContent = folder.title;
 
         // Check if this is the active folder
@@ -1333,6 +1384,12 @@ const addDiagnosticMessage = (message) => {
 
 // Switch to a new bookmark folder
 const switchToFolder = (newFolderId) => {
+  if (!isUserPaid) {
+    statusElement.textContent = 'Please unlock Full Access ($10) to switch bookmark sets.';
+    extpay.openPaymentPage();
+    return;
+  }
+
   // Show status indicator
   statusElement.textContent = 'Saving current bookmarks...';
   

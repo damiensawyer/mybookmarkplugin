@@ -1,9 +1,9 @@
 {
   "manifest_version": 3,
   "name": "Bookmark Set Manager",
-  "version": "2.0",
+  "version": "2.1",
   "description": "Manage different sets of bookmarks in your Bookmarks Bar with automatic syncing",
-  "permissions": ["bookmarks"],
+  "permissions": ["bookmarks", "storage"],
   "action": {
     "default_popup": "popup.html",
     "default_icon": "icon128.png"
@@ -11,6 +11,13 @@
   "background": {
     "service_worker": "background.js"
   },
+  "content_scripts": [
+    {
+      "matches": ["https://extensionpay.com/*"],
+      "js": ["ExtPay.js"],
+      "run_at": "document_start"
+    }
+  ],
   "icons": {
       "16": "icon16.png",
       "19": "icon19.png",
