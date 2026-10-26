@@ -10,9 +10,11 @@ set -euo pipefail
 #   ./publish.sh upload                  # Package & upload draft to Chrome Web Store
 #   ./publish.sh publish                 # Package, upload, and submit for review / publish
 #
-# Required env vars for upload/publish:
-#   CWS_PUBLISHER_ID   Your Chrome Web Store Publisher ID (found on Account page in Developer Console)
-#   CWS_ITEM_ID        Your Extension Item ID (32-char ID assigned after first upload in Developer Console)
+# Upload/publish read these from 1Password (op CLI) unless already set in the env:
+#   CWS_PUBLISHER_ID     op://Employee/Bookmark Set Manager - Chrome Web Store/publisher_id
+#   CWS_ITEM_ID          op://Employee/Bookmark Set Manager - Chrome Web Store/item_id
+#   CWS_SERVICE_ACCOUNT  op://Employee/Bookmark Set Manager - Chrome Web Store/service_account (optional)
+# Override the item location with OP_CWS_ITEM="op://<vault>/<item>".
 # ==============================================================================
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -32,6 +34,27 @@ EXTENSION_FILES=(
   icon48.png
   icon128.png
 )
+
+OP_CWS_ITEM="${OP_CWS_ITEM:-op://Employee/Bookmark Set Manager - Chrome Web Store}"
+
+# Read a field from the 1Password item; prints nothing if the field is missing.
+op_field() {
+  op read "${OP_CWS_ITEM}/$1" 2>/dev/null || true
+}
+
+load_secrets() {
+  if [[ -n "${CWS_PUBLISHER_ID:-}" && -n "${CWS_ITEM_ID:-}" ]]; then
+    return
+  fi
+  if ! command -v op >/dev/null 2>&1; then
+    echo "Error: 1Password CLI 'op' not found and CWS_PUBLISHER_ID/CWS_ITEM_ID are not set." >&2
+    exit 1
+  fi
+  echo "==> Loading Chrome Web Store IDs from 1Password (${OP_CWS_ITEM})..."
+  CWS_PUBLISHER_ID="${CWS_PUBLISHER_ID:-$(op_field publisher_id)}"
+  CWS_ITEM_ID="${CWS_ITEM_ID:-$(op_field item_id)}"
+  CWS_SERVICE_ACCOUNT="${CWS_SERVICE_ACCOUNT:-$(op_field service_account)}"
+}
 
 build_package() {
   echo "==> Building clean extension package: ${ZIP_FILE}..."
@@ -76,11 +99,9 @@ NEXT STEP IN CHROME WEB STORE DEVELOPER CONSOLE:
 2. Go to 'Account' (left sidebar) -> 'Chrome Web Store API' section.
 3. Paste this Service Account email and click Save:
    ${SA_EMAIL}
-4. Copy your 'Publisher ID' from the Account page and your 'Item ID' from your item.
-5. Run:
-   export CWS_PUBLISHER_ID="your-publisher-id"
-   export CWS_ITEM_ID="your-32-char-item-id"
-   export CWS_SERVICE_ACCOUNT="${SA_EMAIL}"
+4. Store the service account in 1Password (publisher/item IDs are already there):
+   op item edit "Bookmark Set Manager - Chrome Web Store" --vault Employee \\
+     'service_account[text]=${SA_EMAIL}'
    ./publish.sh publish
 ================================================================================
 EOF
@@ -108,6 +129,7 @@ get_access_token() {
 }
 
 upload_package() {
+  load_secrets
   : "${CWS_PUBLISHER_ID:?Error: Set CWS_PUBLISHER_ID (from Chrome Web Store Console -> Account)}"
   : "${CWS_ITEM_ID:?Error: Set CWS_ITEM_ID (your 32-character extension ID)}"
 
