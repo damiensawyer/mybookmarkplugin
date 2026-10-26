@@ -37,8 +37,13 @@ EXTENSION_FILES=(
 
 OP_CWS_ITEM="${OP_CWS_ITEM:-op://Employee/Bookmark Set Manager - Chrome Web Store}"
 
-# Read a field from the 1Password item; prints nothing if the field is missing.
+# Read a required field from the 1Password item (fails loudly, e.g. if 1Password is locked).
 op_field() {
+  op read "${OP_CWS_ITEM}/$1"
+}
+
+# Read an optional field; prints nothing if it is missing.
+op_field_optional() {
   op read "${OP_CWS_ITEM}/$1" 2>/dev/null || true
 }
 
@@ -53,7 +58,7 @@ load_secrets() {
   echo "==> Loading Chrome Web Store IDs from 1Password (${OP_CWS_ITEM})..."
   CWS_PUBLISHER_ID="${CWS_PUBLISHER_ID:-$(op_field publisher_id)}"
   CWS_ITEM_ID="${CWS_ITEM_ID:-$(op_field item_id)}"
-  CWS_SERVICE_ACCOUNT="${CWS_SERVICE_ACCOUNT:-$(op_field service_account)}"
+  CWS_SERVICE_ACCOUNT="${CWS_SERVICE_ACCOUNT:-$(op_field_optional service_account)}"
 }
 
 build_package() {
@@ -147,7 +152,7 @@ upload_package() {
     "$UPLOAD_URL")"
 
   echo "$RESPONSE"
-  if echo "$RESPONSE" | grep -q '"uploadState": *"FAILURE"'; then
+  if echo "$RESPONSE" | grep -qE '"uploadState": *"FAILURE"|"error"'; then
     echo "Error: Upload failed." >&2
     exit 1
   fi
@@ -167,6 +172,10 @@ publish_item() {
     "$PUBLISH_URL")"
 
   echo "$RESPONSE"
+  if echo "$RESPONSE" | grep -q '"error"'; then
+    echo "Error: Publish request failed." >&2
+    exit 1
+  fi
   echo "==> Publish request finished."
 }
 

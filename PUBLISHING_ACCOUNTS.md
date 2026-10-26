@@ -15,5 +15,5 @@
 
 ## 3. 1Password
 - **Item:** `Bookmark Set Manager - Chrome Web Store` (vault `Employee`)
-- **Fields:** `publisher_id`, `item_id`, `contact_email`, `developer_account`, `extensionpay_id`, optional `service_account`
+- **Fields:** `publisher_id`, `item_id`, `contact_email`, `developer_account`, `extensionpay_id`, `service_account` (cws-publisher@bookmark-set-manager-cws.iam.gserviceaccount.com), `gcp_project` (bookmark-set-manager-cws)
 - `bookmark-set-manager/publish.sh` reads these via `op read`; env vars `CWS_PUBLISHER_ID` / `CWS_ITEM_ID` / `CWS_SERVICE_ACCOUNT` override them.
